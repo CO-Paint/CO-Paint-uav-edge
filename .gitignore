@@ -1,7 +1,5 @@
-# 1. 일단 폴더 안의 모든 파일을 무시합니다
 Livox-SDK2/*
 Micro-XRCE-DDS-Agent/*
 ws_livox/*
 
-# 2. 하지만 .gitkeep 파일만은 예외로 무시하지 않습니다 (올라가게 함)
 !**/ .gitkeep
