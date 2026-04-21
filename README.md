@@ -17,31 +17,28 @@
 * **Hardware:** Raspberry Pi 5, Pixhawk (PX4 v1.14+)
 
 ### 2. Mandatory Drivers
-* **Livox-SDK2:** - Ubuntu 24.04(GCC 13)에서 빌드 시, `sdk_core/comm/define.h` 및 `logger_handler/file_manager.h`에 `#include <cstdint>` 추가가 필요합니다.
-* **Intel RealSense SDK (librealsense):** - D435 인식 및 ROS 2 토픽 발행을 위해 필요합니다.
-* **Micro-XRCE-DDS-Agent:** https://github.com/eProsima/Micro-XRCE-DDS
+* **Livox-SDK2:**
+  - https://github.com/Livox-SDK/Livox-SDK2
+  - Ubuntu 24.04(GCC 13)에서 빌드 시, `sdk_core/comm/define.h` 및 `logger_handler/file_manager.h`에 `#include <cstdint>` 추가가 필요합니다.
+* **Livox-SDK2:**
+  - https://github.com/Livox-SDK/livox_ros_driver2
+  - ros2 토픽형태로 livox의 데이터를 발송하기위해 필수적입니다.
+* **Intel RealSense SDK (librealsense):**
+  - ```bash
+    sudo apt install ros-$ROS_DISTRO-librealsense2*
+    sudo apt install ros-$ROS_DISTRO-realsense2-*
+    ```
+  - D435 인식 및 ROS 2 토픽 발행을 위해 필요합니다.
+* **Micro-XRCE-DDS-Agent:**
+  - https://github.com/eProsima/Micro-XRCE-DDS
   - 픽스호크와의 고속 UART 통신(921600 bps)을 위해 빌드 및 설치되어야 합니다.
 
-### 3. Networking Setup (Crucial)
-안정적인 데이터 전송을 위해 다음과 같은 포트 구성을 권장합니다.
-* **eth0 (내장 랜포트):** Livox Mid-360 (Static IP: `192.168.1.50`)
-* **USB-Ethernet (USB 2.0 포트):** GCS/Router 연결 (DHCP 추천)
-
----
-
 ## 🚀 Getting Started
-
-### USB Reset Fix (Important)
-라즈베리파이 부팅 시 USB 랜 젠더가 인식되지 않는 고질적인 하드웨어 버그를 해결하기 위해, `crontab`에 아래 리셋 스크립트 등록이 필요합니다.
-
-```bash
-# crontab -e 실행 후 하단에 추가
-@reboot sleep 15 && echo "usb2" > /sys/bus/usb/drivers/usb/unbind && sleep 3 && echo "usb2" > /sys/bus/usb/drivers/usb/bind
-```
 
 ### Build & Workspace Setup
 
 # CO-Paint 통합 워크스페이스 빌드
+```bash
 cd ~/copaint_ws && colcon build --symlink-install
 ```
 
