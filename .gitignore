@@ -1,0 +1,10 @@
+# 외부 레포지토리 폴더 제외
+Livox-SDK2/
+Micro-XRCE-DDS-Agent/
+ws_livox/
+
+# 추가로 파이썬 캐시나 빌드 파일도 제외하면 좋습니다
+__pycache__/
+build/
+install/
+log/
