@@ -19,7 +19,7 @@
 ### 2. Mandatory Drivers
 * **Livox-SDK2:** - Ubuntu 24.04(GCC 13)에서 빌드 시, `sdk_core/comm/define.h` 및 `logger_handler/file_manager.h`에 `#include <cstdint>` 추가가 필요합니다.
 * **Intel RealSense SDK (librealsense):** - D435 인식 및 ROS 2 토픽 발행을 위해 필요합니다.
-* **Micro-XRCE-DDS-Agent:**
+* **Micro-XRCE-DDS-Agent:** https://github.com/eProsima/Micro-XRCE-DDS
   - 픽스호크와의 고속 UART 통신(921600 bps)을 위해 빌드 및 설치되어야 합니다.
 
 ### 3. Networking Setup (Crucial)
