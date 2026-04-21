@@ -14,7 +14,7 @@
 ### 1. System Environment
 * **OS:** Ubuntu 24.04 LTS (Noble Numbat)
 * **ROS 2:** Jazzy 
-* **Hardware:** Raspberry Pi 5, Pixhawk (PX4 v1.14+)
+* **Hardware:** Raspberry Pi 5, Pixhawk (PX4 v1.16+)
 
 ### 2. Mandatory Drivers
 * **Livox-SDK2:**
