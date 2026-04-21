@@ -1,10 +1,7 @@
-# 외부 레포지토리 폴더 제외
-Livox-SDK2/
-Micro-XRCE-DDS-Agent/
-ws_livox/
+# 1. 일단 폴더 안의 모든 파일을 무시합니다
+Livox-SDK2/*
+Micro-XRCE-DDS-Agent/*
+ws_livox/*
 
-# 추가로 파이썬 캐시나 빌드 파일도 제외하면 좋습니다
-__pycache__/
-build/
-install/
-log/
+# 2. 하지만 .gitkeep 파일만은 예외로 무시하지 않습니다 (올라가게 함)
+!**/ .gitkeep
