@@ -20,7 +20,7 @@
 * **Livox-SDK2:**
   - https://github.com/Livox-SDK/Livox-SDK2
   - Ubuntu 24.04(GCC 13)에서 빌드 시, `sdk_core/comm/define.h` 및 `logger_handler/file_manager.h`에 `#include <cstdint>` 추가가 필요합니다.
-* **Livox-SDK2:**
+* **Livox ROS2 Driver:**
   - https://github.com/Livox-SDK/livox_ros_driver2
   - ros2 토픽형태로 livox의 데이터를 발송하기위해 필수적입니다.
 * **Intel RealSense SDK (librealsense):**
