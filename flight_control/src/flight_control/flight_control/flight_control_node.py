@@ -19,8 +19,14 @@ Flight Control Node (UAV) - CO-Paint
 - ALIGN_FOR_LAND:x,y,z  : (x,y,z) 로 이동. 피드백 없음.
 - START_AUTO_LAND       : Z 만 천천히 하강. landed 감지 시 LANDED_CONFIRM 발행 + disarm.
 - EMERGENCY             : 픽스호크 자체 자동 LAND 모드로 전환. (모든 상태에서 수용)
+
+밸브 제어:
+- PAINTING 중 paint_on=True 구간 진입 시 → 호버 → /valve/command OPEN → OPEN 확인 → 이동 재개.
+- paint_on=False 구간(금지구역 통과) 진입 시 → 호버 → CLOSE → CLOSED 확인 → 이동 재개.
+- PAINTING 종료 / EMERGENCY 시 밸브 강제 CLOSE.
 """
 
+import json
 import math
 
 import rclpy
@@ -122,8 +128,18 @@ class FlightControlNode(Node):
         self.create_subscription(
             Path, self.get_parameter('trajectory_topic').value,
             self.trajectory_cb, cmd_qos, callback_group=cb)
+        self.create_subscription(
+            String, '/flight_control/paint_waypoints',
+            self.paint_waypoints_cb, cmd_qos, callback_group=cb)
         self.status_pub = self.create_publisher(
             String, self.get_parameter('status_topic').value, cmd_qos)
+
+        # ---- 밸브 제어 ----
+        self.valve_cmd_pub = self.create_publisher(
+            String, '/valve/command', cmd_qos)
+        self.create_subscription(
+            String, '/valve/status',
+            self.valve_status_cb, cmd_qos, callback_group=cb)
 
         # ---- 상태 변수 ----
         self.state = STANDBY
@@ -141,11 +157,18 @@ class FlightControlNode(Node):
         self.warmup_ticks = int(self.warmup_sec / 0.05)
 
         # 경로 추종용
-        self.path = []          # [(x, y, z, yaw), ...]
+        self.path = []          # [(x, y, z, yaw, paint_on), ...]
         self.wp_index = 0
 
+        # 밸브 상태
+        self.valve_state = 'CLOSED'     # 밸브 노드에서 수신한 현재 상태
+        self.valve_waiting = False      # 밸브 전이 대기 중 (명령 중복 방지)
+
         # 자동 착륙용
+        self.declare_parameter('land_timeout_sec', 30.0)
+        self.land_timeout = float(self.get_parameter('land_timeout_sec').value)
         self.land_z = 0.0
+        self.land_start_time = None   # AUTO_LAND 진입 시각
 
         # ---- 20Hz 메인 타이머 ----
         self.create_timer(0.05, self.control_loop, callback_group=cb)
@@ -186,14 +209,39 @@ class FlightControlNode(Node):
             self.get_logger().warn(f'Unknown command ignored: {raw}')
 
     def trajectory_cb(self, msg: Path):
+        """nav_msgs/Path 수신 (fallback: paint_on 정보 없으면 전부 True)"""
         pts = []
         for ps in msg.poses:
             p = ps.pose.position
             q = ps.pose.orientation
             pts.append((float(p.x), float(p.y), float(p.z),
-                        quat_to_yaw(q.x, q.y, q.z, q.w)))
+                        quat_to_yaw(q.x, q.y, q.z, q.w), True))
         self.path = pts
-        self.get_logger().info(f'Trajectory received: {len(pts)} waypoints')
+        self.get_logger().info(f'Trajectory (Path) received: {len(pts)} waypoints (all paint_on=True)')
+
+    def paint_waypoints_cb(self, msg: String):
+        """paint_on 포함된 JSON 궤적 수신 (우선 사용)"""
+        try:
+            data = json.loads(msg.data)
+            pts = []
+            for wp in data:
+                pts.append((
+                    float(wp['x']), float(wp['y']), float(wp['z']),
+                    0.0,   # yaw=0 (벽 바라봄, planner NED 기준)
+                    bool(wp.get('paint_on', True)),
+                ))
+            self.path = pts
+            paint_cnt = sum(1 for p in pts if p[4])
+            skip_cnt  = len(pts) - paint_cnt
+            self.get_logger().info(
+                f'PaintWaypoints received: {len(pts)} waypoints '
+                f'(paint={paint_cnt}, skip={skip_cnt})')
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            self.get_logger().error(f'paint_waypoints parse error: {e}')
+
+    def valve_status_cb(self, msg: String):
+        """밸브 현재 상태 수신 (CLOSED / OPEN / MOVING / ERROR)"""
+        self.valve_state = msg.data.strip().upper()
 
     # ================= 명령 핸들러 =================
     def _handle_takeoff(self):
@@ -214,6 +262,7 @@ class FlightControlNode(Node):
             self.get_logger().warn('PAINT ignored: no trajectory received')
             return
         self.wp_index = 0
+        self.valve_waiting = False
         self._set_state(PAINTING)
 
     def _handle_align(self, raw_cmd: str):
@@ -247,14 +296,21 @@ class FlightControlNode(Node):
         if self.state not in (HOVER, ALIGN, PAINTING):
             self.get_logger().warn(f'START_AUTO_LAND ignored: not airborne (now {self.state})')
             return
+        # 안전: 착륙 전 밸브 닫기
+        if self.valve_state != 'CLOSED':
+            self.valve_cmd_pub.publish(String(data='CLOSE'))
+        self.valve_waiting = False
         self.target = [self.curr[0], self.curr[1], self.curr[2]]
         self.target_yaw = self.curr_yaw
         self.land_z = self.curr[2]
+        self.land_start_time = self.get_clock().now()
         self._set_state(AUTO_LAND)
 
     def _handle_emergency(self):
-        """EMERGENCY: 픽스호크 자체 자동 LAND 모드로 전환. offboard 송신 중단."""
-        self.get_logger().error('EMERGENCY received -> switching to PX4 NAV_LAND mode')
+        """EMERGENCY: 밸브 닫기 + 픽스호크 자체 자동 LAND 모드로 전환."""
+        self.get_logger().error('EMERGENCY received -> closing valve + switching to PX4 NAV_LAND mode')
+        self.valve_cmd_pub.publish(String(data='CLOSE'))
+        self.valve_waiting = False
         self._send_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
         self._set_state(EMERGENCY)
 
@@ -298,12 +354,33 @@ class FlightControlNode(Node):
             self.get_logger().info(f'TAKEOFF complete -> HOVER (published {STATUS_TAKEOFF_OK})')
 
     def _loop_painting(self):
+        # ── 궤적 완료: 밸브 닫고 종료 ──
         if self.wp_index >= len(self.path):
+            if self.valve_state not in ('CLOSED', 'ERROR'):
+                if not self.valve_waiting:
+                    self._command_valve('CLOSE')
+                return   # 밸브 닫힐 때까지 호버 유지
+            self.valve_waiting = False
             self._set_state(HOVER)
             self.status_pub.publish(String(data=STATUS_PAINT_DONE))
             self.get_logger().info(f'Trajectory complete -> HOVER (published {STATUS_PAINT_DONE})')
             return
-        wx, wy, wz, wyaw = self.path[self.wp_index]
+
+        wp = self.path[self.wp_index]
+        wx, wy, wz, wyaw, paint_on = wp
+
+        # ── 밸브 전이 필요 여부 판단 ──
+        desired_valve = 'OPEN' if paint_on else 'CLOSED'
+        if self.valve_state != desired_valve:
+            if self.valve_state == 'MOVING':
+                return   # 이미 이동 중, 도착 대기
+            if not self.valve_waiting:
+                self._command_valve(desired_valve)
+            return   # 호버 유지 (target 갱신 안 함 → 현재 위치 유지)
+
+        self.valve_waiting = False
+
+        # ── 밸브 OK → 웨이포인트 추종 ──
         self.target = [wx, wy, wz]
         self.target_yaw = wyaw
         dx = wx - self.curr[0]
@@ -313,11 +390,16 @@ class FlightControlNode(Node):
             self.wp_index += 1
 
     def _loop_auto_land(self):
-        # Z만 점진 하강. NED 라 Z=0 이 지면, 음수가 공중.
-        self.land_z += self.land_descent_rate * 0.05
-        if self.land_z > 0.0:
-            self.land_z = 0.0
-        self.target = [self.target[0], self.target[1], self.land_z]
+        """
+        Z만 점진 하강. NED: Z=0이 INIT 지면, 음수가 공중.
+
+        착륙 감지 우선순위:
+          1. PX4 VehicleLandDetected (self.landed) → 즉시 disarm
+          2. 타임아웃 (land_timeout_sec) → PX4 NAV_LAND 폴백
+        Z floor를 +0.3(지면 아래)까지 허용해서 PX4 land detector가
+        확실히 울리도록 setpoint를 밀어줌.
+        """
+        # ── 1순위: PX4 착지 감지 ──
         if self.landed:
             self._disarm()
             self.status_pub.publish(String(data=STATUS_LANDED_CONFIRM))
@@ -325,6 +407,33 @@ class FlightControlNode(Node):
             self.path = []
             self.wp_index = 0
             self._set_state(STANDBY)
+            return
+
+        # ── 2순위: 타임아웃 → PX4 자체 LAND 모드 폴백 ──
+        if self.land_start_time is not None:
+            elapsed = (self.get_clock().now() - self.land_start_time).nanoseconds / 1e9
+            if elapsed >= self.land_timeout:
+                self.get_logger().error(
+                    f'AUTO_LAND {self.land_timeout:.0f}초 타임아웃 '
+                    f'→ PX4 NAV_LAND 모드로 전환')
+                self._send_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
+                self.status_pub.publish(String(data=STATUS_LANDED_CONFIRM))
+                self._set_state(EMERGENCY)
+                return
+
+        # ── Z setpoint 점진 하강 ──
+        self.land_z += self.land_descent_rate * 0.05
+        # Z=+0.3 (지면 30cm 아래)까지 허용 → PX4가 실제로 착지 판정하도록
+        if self.land_z > 0.3:
+            self.land_z = 0.3
+        self.target = [self.target[0], self.target[1], self.land_z]
+
+    # ================= 밸브 제어 =================
+    def _command_valve(self, cmd: str):
+        """밸브 명령 발행. 중복 방지를 위해 valve_waiting 플래그 설정."""
+        self.valve_cmd_pub.publish(String(data=cmd))
+        self.valve_waiting = True
+        self.get_logger().info(f'Valve command: {cmd} (current: {self.valve_state})')
 
     # ================= 픽스호크 송신 =================
     def _publish_offboard_mode(self):
