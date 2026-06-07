@@ -13,10 +13,13 @@ Flight Control Node (UAV) - CO-Paint
 - 좌표계: 모든 setpoint/odometry 는 NED.
 
 명령 명세 (master_node.py 합의 기준):
+- ARM                   : 지상 대기 상태에서 PX4 arm 명령만 전송.
+- DISARM                : 착륙 상태에서 PX4 disarm 명령 전송.
 - TAKEOFF               : 현재 XY 유지, takeoff_altitude 까지 상승. 완료 시 TAKEOFF_OK 발행.
 - PAINT                 : 캐싱된 trajectory 추종. 완료 시 PAINT_DONE 발행.
 - ALIGN_FOR_LAND:x,y    : XY 만 갱신, Z 유지. 피드백 없음.
 - ALIGN_FOR_LAND:x,y,z  : (x,y,z) 로 이동. 피드백 없음.
+- ALIGN_FOR_LAND:x,y,z,yaw_deg : (x,y,z,yaw) 로 이동. yaw는 degree 입력.
 - START_AUTO_LAND       : Z 만 천천히 하강. landed 감지 시 LANDED_CONFIRM 발행 + disarm.
 - EMERGENCY             : 픽스호크 자체 자동 LAND 모드로 전환. (모든 상태에서 수용)
 
@@ -93,7 +96,13 @@ class FlightControlNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
-        cmd_qos = QoSProfile(
+        mission_cmd_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
+        latched_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             history=HistoryPolicy.KEEP_LAST,
@@ -124,22 +133,22 @@ class FlightControlNode(Node):
         # ---- 마스터 노드 통신 ----
         self.create_subscription(
             String, self.get_parameter('mission_cmd_topic').value,
-            self.mission_cmd_cb, cmd_qos, callback_group=cb)
+            self.mission_cmd_cb, mission_cmd_qos, callback_group=cb)
         self.create_subscription(
             Path, self.get_parameter('trajectory_topic').value,
-            self.trajectory_cb, cmd_qos, callback_group=cb)
+            self.trajectory_cb, latched_qos, callback_group=cb)
         self.create_subscription(
             String, '/flight_control/paint_waypoints',
-            self.paint_waypoints_cb, cmd_qos, callback_group=cb)
+            self.paint_waypoints_cb, latched_qos, callback_group=cb)
         self.status_pub = self.create_publisher(
-            String, self.get_parameter('status_topic').value, cmd_qos)
+            String, self.get_parameter('status_topic').value, latched_qos)
 
         # ---- 밸브 제어 ----
         self.valve_cmd_pub = self.create_publisher(
-            String, '/valve/command', cmd_qos)
+            String, '/valve/command', latched_qos)
         self.create_subscription(
             String, '/valve/status',
-            self.valve_status_cb, cmd_qos, callback_group=cb)
+            self.valve_status_cb, latched_qos, callback_group=cb)
 
         # ---- 상태 변수 ----
         self.state = STANDBY
@@ -197,7 +206,11 @@ class FlightControlNode(Node):
             self._handle_emergency()
             return
 
-        if cmd_upper == 'TAKEOFF':
+        if cmd_upper == 'ARM':
+            self._handle_arm()
+        elif cmd_upper == 'DISARM':
+            self._handle_disarm()
+        elif cmd_upper == 'TAKEOFF':
             self._handle_takeoff()
         elif cmd_upper == 'PAINT':
             self._handle_paint()
@@ -244,6 +257,36 @@ class FlightControlNode(Node):
         self.valve_state = msg.data.strip().upper()
 
     # ================= 명령 핸들러 =================
+    def _handle_arm(self):
+        if self.state != STANDBY:
+            self.get_logger().warn(f'ARM ignored: must be in STANDBY (now {self.state})')
+            return
+        if not self.landed:
+            self.get_logger().warn('ARM ignored: vehicle is not landed')
+            return
+        self._arm()
+        self.get_logger().info('ARM command sent')
+
+    def _handle_disarm(self):
+        if not self.landed:
+            self.get_logger().warn(
+                f'DISARM ignored: vehicle appears airborne (state={self.state}); '
+                'use START_AUTO_LAND or EMERGENCY instead')
+            return
+
+        if self.valve_state != 'CLOSED':
+            self.valve_cmd_pub.publish(String(data='CLOSE'))
+
+        self.valve_waiting = False
+        self.offboard_requested = False
+        self.warmup_count = 0
+        self.path = []
+        self.wp_index = 0
+        self.land_start_time = None
+        self._disarm()
+        self._set_state(STANDBY)
+        self.get_logger().info('DISARM command sent')
+
     def _handle_takeoff(self):
         if self.state != STANDBY:
             self.get_logger().warn(f'TAKEOFF ignored: must be in STANDBY (now {self.state})')
@@ -266,31 +309,36 @@ class FlightControlNode(Node):
         self._set_state(PAINTING)
 
     def _handle_align(self, raw_cmd: str):
-        """ALIGN_FOR_LAND:x,y  또는  ALIGN_FOR_LAND:x,y,z"""
+        """ALIGN_FOR_LAND:x,y  /  x,y,z  /  x,y,z,yaw_deg"""
         if self.state not in (HOVER, PAINTING, ALIGN):
             self.get_logger().warn(f'ALIGN_FOR_LAND ignored: not airborne (now {self.state})')
             return
         try:
             payload = raw_cmd.split(':', 1)[1]
-            parts = [float(v) for v in payload.split(',')]
+            parts = [float(v.strip()) for v in payload.split(',')]
         except (IndexError, ValueError) as e:
             self.get_logger().error(f'ALIGN_FOR_LAND parse error: {raw_cmd} ({e})')
             return
 
+        yaw = self.curr_yaw
         if len(parts) == 2:
             x, y = parts
             z = self.target[2]   # Z 유지
         elif len(parts) == 3:
             x, y, z = parts
+        elif len(parts) == 4:
+            x, y, z, yaw_deg = parts
+            yaw = math.radians(yaw_deg)
         else:
-            self.get_logger().error(f'ALIGN_FOR_LAND expects 2 or 3 args, got {len(parts)}')
+            self.get_logger().error(f'ALIGN_FOR_LAND expects 2, 3, or 4 args, got {len(parts)}')
             return
 
         self.target = [x, y, z]
-        self.target_yaw = self.curr_yaw
+        self.target_yaw = yaw
         if self.state != ALIGN:
             self._set_state(ALIGN)
-        self.get_logger().info(f'ALIGN target=({x:.2f}, {y:.2f}, {z:.2f})')
+        self.get_logger().info(
+            f'ALIGN target=({x:.2f}, {y:.2f}, {z:.2f}), yaw={math.degrees(yaw):.1f} deg')
 
     def _handle_auto_land(self):
         if self.state not in (HOVER, ALIGN, PAINTING):
